@@ -107,3 +107,74 @@ El chat de Finance AI continúa sin acceso al contenido de la hoja.
 
 Referencias: [biblioteca oficial de autenticación](https://github.com/googleapis/google-cloud-node/tree/main/core/packages/google-auth-library-nodejs)
 y [lectura de rangos en Sheets API](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets.values/get).
+
+## Resumen inicial de cuentas por pagar
+
+`GET /api/accounts-payable/summary` lee el mismo rango y devuelve únicamente
+cantidades por estado y la suma de `Monto Total` de los comprobantes `NO PAGADO`,
+separada por `Moneda`. La lectura sigue siendo exclusiva del servidor, con la
+misma Service Account y permisos de sólo lectura. No envía datos a OpenAI.
+
+Reglas de esta etapa:
+
+- `NO PAGADO`: cuenta el comprobante y suma su `Monto Total` en su moneda.
+- `PAGADO`: sólo lo cuenta; no lo incluye en los importes pendientes.
+- `PAGADO PARCIAL`: sólo lo cuenta. `pendingBalance: null` significa que el saldo
+  es desconocido porque la hoja no registra cuánto se pagó; nunca se considera cero
+  ni se suma el importe original como deuda. Si hay alguno,
+  `pendingBalanceComplete` es `false`: los totales NO PAGADO no son toda la deuda.
+- `NO PAGAR`: sólo lo cuenta; queda excluido de los importes a pagar.
+- `F. Pago` no interviene en los cálculos: puede ser fecha real de pago o un mes
+  tentativo que cambia según la caja. No se calculan vencidos ni pagos por mes.
+
+Ejemplo ficticio (no corresponde a datos reales):
+
+```json
+{
+  "success": true,
+  "dataRowCount": 5,
+  "unpaid": {
+    "count": 2,
+    "totalsByCurrency": [
+      { "currency": "ARS", "amount": 1500.25 },
+      { "currency": "USD", "amount": 100 }
+    ]
+  },
+  "paid": { "count": 1 },
+  "partiallyPaid": { "count": 1, "pendingBalance": null },
+  "doNotPay": { "count": 1 },
+  "pendingBalanceComplete": false
+}
+```
+
+El rango debe comenzar con los encabezados `Estado`, `Monto Total` y `Moneda`,
+cada uno una sola vez. Se admiten cambios de orden, mayúsculas y espacios. Cada
+fila no vacía se considera un comprobante; no se deduplican registros ni se
+incluyen filas de subtotales. Los encabezados solos devuelven cantidades cero;
+un rango completamente vacío devuelve HTTP 422 porque falta la estructura.
+
+Los importes se piden a Google como números con `UNFORMATTED_VALUE`, sin interpretar
+comas, puntos ni símbolos del formato visual. Las celdas con importes guardados
+como texto se rechazan. Cada importe se redondea a dos decimales (mitades alejadas
+de cero) y se suma en centavos, conservando el signo que figura en la hoja.
+No se interpreta la columna `Tipo` ni se cambia el signo de notas de crédito.
+Las monedas se agrupan por su etiqueta normalizada; `ARS` y `PESOS`, por ejemplo,
+permanecen separadas. No se convierten monedas ni se produce una suma entre ellas.
+
+Un estado vacío/desconocido, un encabezado requerido ausente/duplicado o un
+comprobante NO PAGADO con monto no numérico o sin moneda produce HTTP 422 con un
+mensaje controlado, sin resultados parciales ni valores de las celdas. HTTP 500
+indica falta de configuración o un error interno y HTTP 502 un fallo de Google.
+Las respuestas no se guardan en caché. No se registran claves ni datos de la hoja.
+
+Esta ruta todavía no tiene autenticación de usuarios: quien pueda acceder al
+despliegue y a esta URL podrá ver los totales por moneda. La interfaz y el chat
+no consumen este resumen todavía. Los resultados abarcan sólo el rango configurado;
+la prueba de conectividad `/api/accounts-payable/test` conserva su respuesta original.
+
+`npm test` ejecuta pruebas permanentes con datos ficticios para verificar las reglas,
+los pagos parciales, las monedas, los redondeos y los datos inválidos. No requiere
+credenciales, conexiones externas ni dependencias adicionales. Las pruebas usan
+el soporte TypeScript de Node.js 22.6 o superior; se recomienda Node.js 24 LTS.
+
+Referencia: [valores numéricos sin formato en Sheets API](https://developers.google.com/workspace/sheets/api/reference/rest/v4/ValueRenderOption).
